@@ -35,6 +35,9 @@
 #include "storage_mongodb.h"
 #include "perf.h"
 
+uint64_t old_del_mongodb = 0;
+uint64_t old_ref_mongodb = 0;
+
 static struct mongodb_context *
 mongodb_context_create(const char *sensor_name, const char *uri, const char *database, const char *collection)
 {
@@ -177,7 +180,31 @@ mongodb_store_report(struct storage_module *module, struct payload *payload)
 
                 for (event_value = zhashx_first(cpu_data->events); event_value; event_value = zhashx_next(cpu_data->events)) {
                     event_name = zhashx_cursor(cpu_data->events);
-                    BSON_APPEND_DOUBLE(&doc_cpu, event_name, *event_value);
+                    if(strcmp(event_name, "CPPC_DEL") == 0){
+                        uint64_t delta = 0;
+                        if(old_del_mongodb == 0){
+                            old_del_mongodb = *event_value;
+                        }
+                        else {
+                            delta = *event_value - old_del_mongodb;
+                            old_del_mongodb = *event_value;
+                        }
+                        BSON_APPEND_DOUBLE(&doc_cpu, event_name, delta);
+                    }
+                    else if(strcmp(event_name, "CPPC_REF") == 0){
+                        uint64_t delta = 0;
+                        if(old_ref_mongodb == 0){
+                            old_ref_mongodb = *event_value;
+                        }
+                        else {
+                            delta = *event_value - old_ref_mongodb;
+                            old_ref_mongodb = *event_value;
+                        }
+                        BSON_APPEND_DOUBLE(&doc_cpu, event_name, delta);
+                    }
+                    else {
+                        BSON_APPEND_DOUBLE(&doc_cpu, event_name, *event_value);
+                    }
                 }
 
                 bson_append_document_end(&doc_pkg, &doc_cpu);

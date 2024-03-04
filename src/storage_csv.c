@@ -38,6 +38,9 @@
 #include "storage_csv.h"
 #include "config.h"
 
+uint64_t old_del_csv = 0;
+uint64_t old_ref_csv = 0;
+
 static void
 group_fd_destroy(FILE **fd_ptr)
 {
@@ -217,13 +220,43 @@ write_events_value(struct csv_context *ctx, const char *group, FILE *fd, uint64_
  
     /* write dynamic elements (events) to buffer */
     for (event_name = zlistx_first(events_name); event_name; event_name = zlistx_next(events_name)) {
+        
         event_value = zhashx_lookup(events, event_name);
         if (!event_value)
             return -1;
-
-        pos += snprintf(buffer + pos, CSV_LINE_BUFFER_SIZE - pos, ",%" PRIu64, *event_value);
-        if (pos >= CSV_LINE_BUFFER_SIZE)
-            return -1;
+        
+        if(strcmp(event_name, "CPPC_DEL") == 0){
+            uint64_t delta = 0;
+            if(old_del_csv == 0){
+                old_del_csv = *event_value;
+            }
+            else {
+                delta = *event_value - old_del_csv;
+                old_del_csv = *event_value;
+            }
+            pos += snprintf(buffer + pos, CSV_LINE_BUFFER_SIZE - pos, ",%" PRIu64, delta);
+            if (pos >= CSV_LINE_BUFFER_SIZE)
+                return -1;
+        }
+        else if(strcmp(event_name, "CPPC_REF") == 0){
+            uint64_t delta = 0;
+            if(old_ref_csv == 0){
+                old_ref_csv = *event_value;
+            }
+            else {
+                delta = *event_value - old_ref_csv;
+                old_ref_csv = *event_value;
+            }
+            pos += snprintf(buffer + pos, CSV_LINE_BUFFER_SIZE - pos, ",%" PRIu64, delta);
+            if (pos >= CSV_LINE_BUFFER_SIZE)
+                return -1;
+        }
+        else {
+            pos += snprintf(buffer + pos, CSV_LINE_BUFFER_SIZE - pos, ",%" PRIu64, *event_value);
+            if (pos >= CSV_LINE_BUFFER_SIZE)
+                return -1;
+        }
+        
     }
 
     if (fprintf(fd, "%s\n", buffer) < 0)

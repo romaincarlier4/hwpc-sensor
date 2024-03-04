@@ -37,6 +37,7 @@
 #include <sys/ioctl.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <stdio.h>
 
 #include "target.h"
 #include "hwinfo.h"
@@ -218,17 +219,29 @@ perf_events_group_setup_cpu(struct perf_context *ctx, struct perf_group_cpu_cont
     }
 
     for (event = zlistx_first(group->events); event; event = zlistx_next(group->events)) {
-        errno = 0;
-        perf_fd = perf_event_open(&event->attr, ctx->cgroup_fd, (int) cpu, group_fd, perf_flags);
+        if(strcmp(event->name, "XGENE_ENERGY_IO") == 0){
+            perf_fd = open("/sys/class/hwmon/hwmon5/power2_input", O_RDONLY);
+        }
+        else if(strcmp(event->name, "XGENE_ENERGY_CPU") == 0){
+            perf_fd = open("/sys/class/hwmon/hwmon5/power1_input", O_RDONLY);
+        }
+        else if(strcmp(event->name, "CPPC") == 0){
+            char feedback_fd_name[200];
+            sprintf(feedback_fd_name, "/sys/devices/system/cpu/cpu%s/acpi_cppc/feedback_ctrs", cpu_id);
+            perf_fd = open(feedback_fd_name, O_RDONLY);
+        }
+        else {
+            errno = 0;
+            perf_fd = perf_event_open(&event->attr, ctx->cgroup_fd, (int) cpu, group_fd, perf_flags);
+            
+            /* the first event is the group leader */
+            if (group_fd == -1)
+                group_fd = perf_fd;
+        }
         if (perf_fd < 1) {
             zsys_error("perf<%s>: failed opening perf event for group=%s cpu=%d event=%s errno=%d", ctx->target_name, group->name, (int) cpu, event->name, errno);
             return -1;
         }
-
-        /* the first event is the group leader */
-        if (group_fd == -1)
-            group_fd = perf_fd;
-
         zlistx_add_end(cpu_ctx->perf_fds, &perf_fd);
     }
 
@@ -342,13 +355,15 @@ perf_events_groups_enable(struct perf_context *ctx)
                     continue;
                 }
 
-                errno = 0;
-                if (ioctl(*group_leader_fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP))
-                    zsys_error("perf<%s>: cannot reset events for group=%s pkg=%s cpu=%s errno=%d", ctx->target_name, group_name, pkg_id, cpu_id, errno);
+                if(strcmp(group_name, "msr") != 0 && strcmp(group_name, "rapl") != 0){
+                    errno = 0;
+                    if (ioctl(*group_leader_fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP))
+                        zsys_error("perf<%s>: cannot reset events for group=%s pkg=%s cpu=%s errno=%d", ctx->target_name, group_name, pkg_id, cpu_id, errno);
 
-                errno = 0;
-                if (ioctl(*group_leader_fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP))
-                    zsys_error("perf<%s>: cannot enable events for group=%s pkg=%s cpu=%s errno=%d", ctx->target_name, group_name, pkg_id, cpu_id, errno);
+                    errno = 0;
+                    if (ioctl(*group_leader_fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP))
+                        zsys_error("perf<%s>: cannot enable events for group=%s pkg=%s cpu=%s errno=%d", ctx->target_name, group_name, pkg_id, cpu_id, errno);
+                }
             }
         }
     }
@@ -370,6 +385,62 @@ perf_events_group_read_cpu(struct perf_group_cpu_context *cpu_ctx, struct perf_r
     if (ioctl(*group_leader_fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP))
         return -1;
 
+    return 0;
+}
+
+static int
+perf_events_group_read_cpu_power(struct perf_group_cpu_context *cpu_ctx, struct perf_read_format *buffer)
+{
+    int *power_fd = NULL;
+    int i = 0;
+    size_t read_size = 100;
+    
+    buffer->nr = 0;
+    buffer->time_enabled = 0;
+    buffer->time_running = 0;
+
+    for (power_fd = zlistx_first(cpu_ctx->perf_fds); power_fd; power_fd = zlistx_next(cpu_ctx->perf_fds)) {
+        char power_str[read_size];
+
+        lseek(*power_fd, 0, SEEK_SET);
+        if (read(*power_fd, power_str, read_size) < 0)
+            return -1;
+        
+        uint64_t power = (uint64_t) strtol(power_str, NULL, 10);
+
+        buffer->values[i].value = power;
+        i++;
+    }
+    
+    return 0;
+}
+
+static int
+perf_events_group_read_cpu_freq(struct perf_group_cpu_context *cpu_ctx, struct perf_read_format *buffer)
+{
+    int *freq_fd = NULL;
+
+    freq_fd = zlistx_first(cpu_ctx->perf_fds);
+    if (!freq_fd)
+        return -1;
+
+    buffer->nr = 0;
+    buffer->time_enabled = 0;
+    buffer->time_running = 0;
+
+    size_t read_size = 100;
+    char feedback_char[read_size];
+    lseek(*freq_fd, 0, SEEK_SET);
+    if(read(*freq_fd, feedback_char, read_size) < 0){
+        return -1;
+    }
+
+    char delivered_counter_str[read_size], reference_counter_str[read_size];
+    sscanf(feedback_char, "ref:%s del:%s", reference_counter_str, delivered_counter_str);
+    uint64_t delivered_counter = strtol(delivered_counter_str, NULL, 10);
+    uint64_t reference_counter = strtol(reference_counter_str, NULL, 10);
+    buffer->values[0].value = delivered_counter;
+    buffer->values[1].value = reference_counter;
     return 0;
 }
 
@@ -421,7 +492,13 @@ populate_payload(struct perf_context *ctx, struct payload *payload)
         }
 
         /* shared perf read buffer */
-        perf_read_buffer_size = offsetof(struct perf_read_format, values) + sizeof(struct perf_counter_value[zlistx_size(group_ctx->config->events)]);
+        if(strcmp(group_name, "msr") == 0){
+            perf_read_buffer_size = offsetof(struct perf_read_format, values) + sizeof(struct perf_counter_value[zlistx_size(group_ctx->config->events) * 2]);
+        }
+        else {
+            perf_read_buffer_size = offsetof(struct perf_read_format, values) + sizeof(struct perf_counter_value[zlistx_size(group_ctx->config->events)]);
+        }
+        
         perf_read_buffer = malloc(perf_read_buffer_size);
         if (!perf_read_buffer) {
             zsys_error("perf<%s>: failed to allocate perf read buffer for group=%s", ctx->target_name, group_name);
@@ -444,26 +521,54 @@ populate_payload(struct perf_context *ctx, struct payload *payload)
                     goto error;
                 }
 
-                /* read counters value for the cpu */
-                if (perf_events_group_read_cpu(cpu_ctx, perf_read_buffer, perf_read_buffer_size)) {
-                    zsys_error("perf<%s>: cannot read perf values for group=%s pkg=%s cpu=%s", ctx->target_name, group_name, pkg_id, cpu_id);
-                    goto error;
+                if(strcmp(group_name, "msr") == 0){
+                    if (perf_events_group_read_cpu_freq(cpu_ctx, perf_read_buffer)) {
+                        zsys_error("perf<%s>: cannot read freq values for group=%s pkg=%s cpu=%s", ctx->target_name, group_name, pkg_id, cpu_id);
+                        goto error;
+                    }
+                }
+                else if(strcmp(group_name, "rapl") == 0){
+                    if (perf_events_group_read_cpu_power(cpu_ctx, perf_read_buffer)) {
+                        zsys_error("perf<%s>: cannot read power values for group=%s pkg=%s cpu=%s", ctx->target_name, group_name, pkg_id, cpu_id);
+                        goto error;
+                    }
+                }
+                else {
+                    /* read counters value for the cpu */
+                    if (perf_events_group_read_cpu(cpu_ctx, perf_read_buffer, perf_read_buffer_size)) {
+                        zsys_error("perf<%s>: cannot read perf values for group=%s pkg=%s cpu=%s", ctx->target_name, group_name, pkg_id, cpu_id);
+                        goto error;
+                    }
+
+                    /* warn if PMU multiplexing is happening */
+                    perf_multiplexing_ratio = compute_perf_multiplexing_ratio(perf_read_buffer);
+                    if (perf_multiplexing_ratio < 1.0) {
+                        zsys_warning("perf<%s>: perf multiplexing for group=%s pkg=%s cpu=%s ratio=%f", ctx->target_name, group_name, pkg_id, cpu_id, perf_multiplexing_ratio);
+                    }
                 }
 
-                /* warn if PMU multiplexing is happening */
-                perf_multiplexing_ratio = compute_perf_multiplexing_ratio(perf_read_buffer);
-                if (perf_multiplexing_ratio < 1.0) {
-                    zsys_warning("perf<%s>: perf multiplexing for group=%s pkg=%s cpu=%s ratio=%f", ctx->target_name, group_name, pkg_id, cpu_id, perf_multiplexing_ratio);
-                }
-
-                /* store events value */
                 zhashx_insert(cpu_data->events, "time_enabled", &perf_read_buffer->time_enabled);
                 zhashx_insert(cpu_data->events, "time_running", &perf_read_buffer->time_running);
-                for (event = zlistx_first(group_ctx->config->events), event_i = 0; event; event = zlistx_next(group_ctx->config->events), event_i++) {
-                    zhashx_insert(cpu_data->events, event->name, &perf_read_buffer->values[event_i].value);
+
+                if(strcmp(group_name, "msr") == 0){
+                    
+                    for (event = zlistx_first(group_ctx->config->events), event_i = 0; event; event = zlistx_next(group_ctx->config->events), event_i++) {
+                        zhashx_insert(cpu_data->events, "CPPC_DEL", &perf_read_buffer->values[0].value);
+                        zhashx_insert(cpu_data->events, "CPPC_REF", &perf_read_buffer->values[1].value);
+                    }
+
+                    zhashx_insert(pkg_data->cpus, cpu_id, cpu_data);
+                }
+                else {
+                    /* store events value */
+                    for (event = zlistx_first(group_ctx->config->events), event_i = 0; event; event = zlistx_next(group_ctx->config->events), event_i++) {
+                        zhashx_insert(cpu_data->events, event->name, &perf_read_buffer->values[event_i].value);
+                    }
+
+                    zhashx_insert(pkg_data->cpus, cpu_id, cpu_data);
                 }
 
-                zhashx_insert(pkg_data->cpus, cpu_id, cpu_data);
+                
             }
 
             zhashx_insert(group_data->pkgs, pkg_id, pkg_data);

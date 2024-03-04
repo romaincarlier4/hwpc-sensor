@@ -39,6 +39,22 @@
 static int
 setup_perf_event_attr(const char *event_name, struct perf_event_attr *attr)
 {
+    if(strcmp(event_name, "XGENE_ENERGY_PKG") == 0){
+        return 0;
+    }
+
+    if(strcmp(event_name, "XGENE_ENERGY_CPU") == 0){
+        return 0;
+    }
+
+    if(strcmp(event_name, "XGENE_ENERGY_IO") == 0){
+        return 0;
+    }
+
+    if(strcmp(event_name, "CPPC") == 0 || strcmp(event_name, "CPPC_DEL") == 0 || strcmp(event_name, "CPPC_REF") == 0){
+        return 0;
+    }
+
     pfm_perf_encode_arg_t arg = {0};
 
     attr->size = sizeof(struct perf_event_attr);
