@@ -1,0 +1,16 @@
+version: '3'
+services:
+
+  hwpc-sensor:
+      image: hwpc-sensor-ampere
+      container_name: hwpc_sensor
+      privileged: true
+      pid: 'host'
+      network_mode: "host"
+      volumes:
+        - /sys:/sys
+        - /var/lib/docker/containers:/var/lib/docker/containers:ro
+        - /tmp/powerapi-sensor-reporting:/reporting
+        - .:/srv
+        - ./sensor-config.json:/sensor_config.json
+      command: '--config-file /sensor_config.json'

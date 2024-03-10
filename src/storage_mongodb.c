@@ -35,8 +35,8 @@
 #include "storage_mongodb.h"
 #include "perf.h"
 
-uint64_t old_del_mongodb = 0;
-uint64_t old_ref_mongodb = 0;
+uint64_t old_del_mongodb[128] = {0};
+uint64_t old_ref_mongodb[128] = {0};
 
 static struct mongodb_context *
 mongodb_context_create(const char *sensor_name, const char *uri, const char *database, const char *collection)
@@ -132,6 +132,7 @@ mongodb_store_report(struct storage_module *module, struct payload *payload)
     bson_t doc_pkg;
     struct payload_cpu_data *cpu_data = NULL;
     const char *cpu_id = NULL;
+    char* endptr;
     bson_t doc_cpu;
     const char *event_name = NULL;
     uint64_t *event_value = NULL;
@@ -176,6 +177,7 @@ mongodb_store_report(struct storage_module *module, struct payload *payload)
 
             for (cpu_data = zhashx_first(pkg_data->cpus); cpu_data; cpu_data = zhashx_next(pkg_data->cpus)) {
                 cpu_id = zhashx_cursor(pkg_data->cpus);
+                long cpu_id_l = strtol(cpu_id, &endptr, 10);
                 BSON_APPEND_DOCUMENT_BEGIN(&doc_pkg, cpu_id, &doc_cpu);
 
                 for (event_value = zhashx_first(cpu_data->events); event_value; event_value = zhashx_next(cpu_data->events)) {
@@ -183,22 +185,22 @@ mongodb_store_report(struct storage_module *module, struct payload *payload)
                     if(strcmp(event_name, "CPPC_DEL") == 0){
                         uint64_t delta = 0;
                         if(old_del_mongodb == 0){
-                            old_del_mongodb = *event_value;
+                            old_del_mongodb[cpu_id_l] = *event_value;
                         }
                         else {
-                            delta = *event_value - old_del_mongodb;
-                            old_del_mongodb = *event_value;
+                            delta = *event_value - old_del_mongodb[cpu_id_l];
+                            old_del_mongodb[cpu_id_l] = *event_value;
                         }
                         BSON_APPEND_DOUBLE(&doc_cpu, event_name, delta);
                     }
                     else if(strcmp(event_name, "CPPC_REF") == 0){
                         uint64_t delta = 0;
                         if(old_ref_mongodb == 0){
-                            old_ref_mongodb = *event_value;
+                            old_ref_mongodb[cpu_id_l] = *event_value;
                         }
                         else {
-                            delta = *event_value - old_ref_mongodb;
-                            old_ref_mongodb = *event_value;
+                            delta = *event_value - old_ref_mongodb[cpu_id_l];
+                            old_ref_mongodb[cpu_id_l] = *event_value;
                         }
                         BSON_APPEND_DOUBLE(&doc_cpu, event_name, delta);
                     }

@@ -1,0 +1,27 @@
+{
+    "name": "sensor",
+    "verbose": true,
+    "frequency": 1000,
+    "output": {
+      "type": "csv",
+      "directory": "/tmp/sensor_output/"
+    },
+    "system": {
+      "rapl": {
+        "events": ["XGENE_ENERGY_CPU", "XGENE_ENERGY_IO"],
+        "monitoring_type": "MONITOR_ONE_CPU_PER_SOCKET"
+      },
+      "msr": {
+        "events": ["CPPC"]
+      }
+    },
+    "container": {
+      "core": {
+        "events": [
+          "PERF_COUNT_HW_CPU_CYCLES",
+          "PERF_COUNT_HW_INSTRUCTIONS",
+          "PERF_COUNT_HW_STALLED_CYCLES_FRONTEND"
+        ]
+      }
+    }
+  }
